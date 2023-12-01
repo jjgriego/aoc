@@ -1,0 +1,108 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
+module Day15 where
+
+import Debug.Trace
+import Text.Megaparsec hiding (getInput)
+import Control.Lens
+import Control.Monad
+import Data.Monoid
+import Data.Semigroup hiding (First, getFirst)
+import Control.Applicative hiding (some, many)
+import Control.Monad.State
+import Control.Monad.Writer hiding (First, getFirst)
+import Control.Monad.Cont
+import Control.Monad.Trans.Maybe
+import Control.Monad.Logic
+import Control.Monad.IO.Class
+import Data.Fix
+import Text.Megaparsec.Char
+import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import qualified Data.Map as M
+import qualified Data.Set as S
+import Data.Foldable
+import Data.String
+import Data.Maybe
+import Data.List
+import Data.Bits
+import Data.Array
+import Data.Char
+import Data.Tuple
+import Data.Function (on)
+import qualified Data.Graph.Inductive as G
+
+data Input = Input { inputTemplate :: String
+                   , inputPairs :: [((Char, Char), Char)]
+                   } deriving Show
+
+parser_input :: forall s. (Stream s, Token s ~ Char, IsString (Tokens s)) => Parsec () s [[Int]]
+parser_input = endBy1 (many (readDigit <$> digitChar)) newline
+  where
+    readDigit c = read [c]
+
+getInput = do
+  txt <- T.readFile "inputs/15.txt"
+  let result = parse parser_input "<input>" txt
+  case result of
+    Right input -> return input
+    Left _ -> error "getInput"
+
+data Problem gr = Problem { graph :: gr () Int
+                          , start :: G.Node
+                          , end   :: G.Node }
+
+loadInput input = Problem { graph = G.mkGraph nodes edges
+                          , start = node 0 0
+                          , end = node (n - 1) (m - 1)
+                          }
+  where
+    n = length (head input)
+    m = length input
+
+    arrBounds = ((0,0), (n-1, m-1))
+
+    weights = array arrBounds [ ((x, y), (input !! y) !! x)
+                              | x <- [0 .. n-1]
+                              , y <- [0 .. m-1]
+                              ]
+
+    lookupWeight x y
+      | x >= 0 && x < n &&
+        y >= 0 && y < m    = Just (weights ! (x,y))
+      | otherwise          = Nothing
+
+    mapNeighborhood f x y = [ f (x - 1) y
+                            , f (x + 1) y
+                            , f x (y - 1)
+                            , f x (y + 1)]
+
+    mkEdge :: Int -> Int -> Int -> Int -> Maybe (Int, Int, Int)
+    mkEdge x0 y0 x1 y1 = (node x0 y0, node x1 y1, ) <$> lookupWeight x1 y1
+
+    edgesOut x y = catMaybes (mapNeighborhood (mkEdge x y) x y)
+
+    edges :: [(Int, Int, Int)]
+    edges = concat [ edgesOut x y | x <- [0 .. n-1], y <- [0 .. m-1] ]
+    nodes = [ (node x y, ()) | x <- [0 .. n-1] , y <- [0 .. m-1] ]
+
+    node x y = x + y * n
+
+lowestRiskPath Problem{..} = G.sp start end graph
+
+soln = do
+  problem <- loadInput @G.Gr <$> getInput
+  return $ lowestRiskPath problem
+
+
