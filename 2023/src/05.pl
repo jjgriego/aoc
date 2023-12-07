@@ -18,12 +18,12 @@ load_map(map(Src, Dst, Ranges)) :- maplist(load_range(Src, Dst), Ranges).
 load_range(Src, Dst, range(X0, Y0, Len)) :- assertz(map_range(Src, Dst, X0, Y0, Len)).
 
 solution1(X) :- aggregate_all(min(L), (seed(S), seed_location(S, L)), X).
-solution2(X) :- aggregate_all(min(L), (seed2(S), seed_location(S, L)), X).
+solution2(X) :- aggregate_all(min(M), (seed2(S), seed_location(S, L), fd_inf(L, M)), X).
 
 seed_location(S, L) :-
     locationof(seed, S, L).
 
-seed2(S) :- seed_range(S0, Len), S1 is S0 + Len - 1, between(S0, S1, S).
+seed2(S) :- seed_range(S0, Len), S1 is S0 + Len - 1, S in S0..S1.
 
 locationof(Src, X, L) :-
     correspond(Src, location, X, L), !.
