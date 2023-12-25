@@ -64,6 +64,8 @@ path_(N, X, Y, D) :-
 
 path(N, X, Y) :- path_(N, X, Y, _).
 
+:- table component/3 as subsumptive.
+
 :- table inside/2 as subsumptive.
 :- table outside/3.
 
