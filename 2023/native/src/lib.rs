@@ -1,178 +1,133 @@
+#![allow(dead_code)]
+
 use swipl::prelude::*;
 
-struct TensorHeader {
-    refs: usize,
-    dims_count: u32,
-    dims_capacity: u32,
-    elems_capacity: usize,
+use std::ops::Range;
+use std::rc::Rc;
+use std::cell::UnsafeCell;
+
+#[derive(Clone)]
+pub struct Axis {
+    start: isize,
+    end: isize,
+    offset: isize,
+    scale: usize
 }
 
-struct Tensor<T>( *mut T );
+impl Axis {
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
+    }
+
+    pub fn contains(&self, x: isize) -> bool {
+        if x >= self.end {
+            false
+        } else if x < self.start {
+            false
+        } else {
+            true
+        }
+    }
+}
+
+fn intersect_range<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Range<T> {
+    std::cmp::max(a.start, b.start) .. std::cmp::min(a.end, b.end)
+}
+
+fn range_subset<T: Ord + Copy>(big: &Range<T>, b: &Range<T>) -> bool {
+    if small.begin < big.begin {
+        false
+    } else if small.end > big.end {
+        false
+    } else {
+        true
+    }
+}
+
+pub struct Tensor<T> {
+    axes: Vec<Axis>,
+    elems: Vec<T>
+}
 
 impl <T> Tensor<T> {
-    fn layout(ndims: u32, nelems: usize) -> std::alloc::Layout {
-        use std::alloc::*;
-
-        let dims_layout = Layout::array::<usize>(ndims as usize).unwrap();
-        let header = Layout::new::<TensorHeader>();
-        let data_layout = Layout::array::<T>(nelems).unwrap();
-
-        dims_layout.extend(header).unwrap().0.extend(data_layout).unwrap().0
+    pub fn alloc(axes: Vec<Axis>) -> Self {
+        let mut count = 1;
+        for axis in axes.iter() {
+            count *= axis.len();
+        }
+        let mut elems = Vec::new();
+        elems.reserve_exact(count);
+        Tensor { axes, elems }
     }
 
-    fn alloc(ndims: u32, nelems: usize) -> Tensor<T> {
-        use std::alloc::*;
-
-        let begin = unsafe { alloc_zeroed(Self::layout(ndims, nelems)) };
-
-        // println!("get {:x}", begin as usize);
-        let res = Tensor(
-            unsafe {
-                begin.offset(
-                    (std::mem::size_of::<TensorHeader>() +
-                     std::mem::size_of::<usize>() * (ndims as usize) ) as isize
-                ) as *mut T
+    fn effective_index(&self, idxs: &[isize]) -> Option<usize> {
+        let mut effective_idx: usize = 0;
+        for (axis_idx, idx) in idxs.iter().enumerate() {
+            let axis = &self.axes[axis_idx];
+            if !axis.contains(*idx) {
+                return None
             }
-        );
-        // println!("ret {:x}", res.0 as usize);
-
-        res.header_mut().refs = 1;
-        res.header_mut().dims_count = ndims;
-        res.header_mut().dims_capacity = ndims;
-        res.header_mut().elems_capacity = nelems;
-
-        res
-    }
-
-    unsafe fn dealloc(&mut self) {
-        let ndims = self.header().dims_count;
-        let nelems = self.header().elems_capacity;
-        unsafe {
-            std::alloc::dealloc(self.0 as *mut u8, Self::layout(ndims, nelems));
+            effective_idx += ((idx - axis.start + axis.offset) as usize) * axis.scale;
         }
+        Some(effective_idx)
     }
 
-    fn dims_mut(&self) -> &mut [usize] {
-        let header = self.header();
-        let size = header.dims_count as usize;
-        unsafe {
-            let begin = ((header as *const TensorHeader) as *mut usize).offset(-1 * (header.dims_count as isize));
-            std::slice::from_raw_parts_mut(begin, size)
-        }
-    }
-
-    fn dims(&self) -> &[usize] {
-        self.dims_mut()
-    }
-
-    fn header_mut(&self) -> &mut TensorHeader {
-        unsafe {
-            let header_ptr = (self.0 as *mut u8).offset(
-                -1 * (std::mem::size_of::<TensorHeader>() as isize)
-            ) as *mut TensorHeader;
-
-            // println!("header: {:x}", header_ptr as usize);
-
-            header_ptr.as_mut().unwrap()
-        }
-    }
-
-    fn header(&self) -> &TensorHeader {
-        self.header_mut()
-    }
-
-    fn size(&self) -> usize {
-        let mut result = 1;
-        for dim in self.dims() {
-            result *= dim;
-        }
-        result
-    }
-
-    fn elems_mut(&self) -> &mut [T] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.0, self.size())
-        }
-    }
-
-    fn elems(&self) -> &[T] {
-        self.elems_mut()
-    }
-
-    fn marshall_indices(&self, t: &Term<'_>) -> PrologResult<usize> {
-        let f = t.get::<Functor>()?;
-
-        // println!("arity {} dims {}", f.arity(), self.header().ndims);
-        if (f.arity() as usize) != (self.header().dims_count as usize) {
-            return Err(PrologError::Failure);
+    fn bounds_check(&self, hull: &[Range<isize>], src: &Self) -> bool {
+        if src.axes.len() != self.axes.len() {
+            return false;
         }
 
-        let mut result: usize = 0;
-        let mut step: usize = 1;
-        for (idx, dim) in self.dims().iter().enumerate() {
-            let i: usize = t.get_arg_ex::<u64>(idx + 1)? as usize;
-            if !(1..(dim + 1)).contains(&i) {
-                return Err(PrologError::Failure);
+        if hull.len() != src.axes.len() {
+            return false;
+        }
+
+        for idx in 0..(hull.len()) {
+            if !range_subset(src.axes[idx].logical_range(), hull[idx]) {
+                return false;
             }
-            result += step * (i - 1);
-            step *= dim;
-        }
-        Ok(result)
-    }
-
-}
-
-impl <T> Drop for Tensor<T> {
-    fn drop(&mut self) {
-        let refs = &mut self.header_mut().refs;
-        assert!(*refs > 0);
-        *refs -= 1;
-        if *refs == 0 {
-            unsafe {
-                self.dealloc();
+            if !range_subset(self.axes[idx].logical_range(), hull[idx]) {
+                return false;
             }
         }
+        return true;
+    }
+
+    fn add(&mut self, hull: &[Range<isize>], src: &Self) -> bool {
+        // bounds check the whole access
+        if !self.bounds_check(hull, src) { return false; }
+
+        for axis in 0..(hull.len()) {
+            let hull_axis = &hull[axis];
+            let n = hull_axis.end - hull_axis.start;
+        }
+
+
     }
 }
 
-impl <T> Clone for Tensor<T> {
-    fn clone(&self) -> Tensor<T> {
-        let refs = &mut self.header_mut().refs;
-        *refs += 1;
-        Tensor(self.0)
+pub struct TensorHandle<T>(Rc<UnsafeCell<Tensor<T>>>);
+
+impl <T> TensorHandle<T> {
+    pub fn reference_eq(a: &Self, b: &Self) -> bool{
+        std::ptr::eq(Rc::as_ptr(&a.0), Rc::as_ptr(&b.0))
     }
 }
 
-unsafe impl <T> Send for Tensor<T> { }
-unsafe impl <T> Sync for Tensor<T> { }
+#[clone_blob("tensor", defaults)]
+#[derive(Clone)]
+enum AnyTensor {
+    TensorInt(Rc<UnsafeCell<Tensor<i64>>>),
+    TensorFloat(Rc<UnsafeCell<Tensor<f64>>>),
+}
 
-wrapped_clone_blob!("tensor_i64", TensorInt, Tensor<i64>, defaults);
-wrapped_clone_blob!("tensor_f64", TensorFloat, Tensor<f64>, defaults);
+unsafe impl Sync for AnyTensor {}
+unsafe impl Send for AnyTensor {}
 
 predicates! {
-    pub semidet fn iota(_ctx, x, r) {
-        let n: usize = x.get::<u64>()?.try_into().unwrap();
-        let result = Tensor::<i64>::alloc(1, n);
-        result.dims_mut()[0] = n;
-        for i in 0..n {
-            result.elems_mut()[i] = (i + 1) as i64;
-        }
-        r.unify(TensorInt(result))
-    }
-
-    pub semidet fn get_int(_ctx, x, idxs, r) {
-        let t = x.get::<TensorInt>()?;
-        let i: usize = t.marshall_indices(idxs)?;
-        // println!("index {}", i);
-        r.unify(t.0.elems()[i])
-
-    }
 
 }
 
 
 #[no_mangle]
 pub extern "C" fn install() {
-    register_iota();
-    register_get_int();
 }
